@@ -4,17 +4,17 @@
 #include <Adafruit_GC9A01A.h>
 #include <Adafruit_SSD1306.h>
 #include <Wire.h>
+#include <EEPROM.h>
 
 #define TFT_DC 2
 #define TFT_CS 4
 #define SCREEN_WIDTH 128 // OLED display width,  in pixels
 #define SCREEN_HEIGHT 64 // OLED display height, in pixels
 #define OLED_RESET -1    // Reset pin # (or -1 if sharing Arduino resetpin)
+#define EEPROM_SIZE 1
 
+// ESP32 DEVKIT V1:
 
-
-//ESP32 DEVKIT V1:
-/*
 const int buttonDistancePin = 13;  // Wybór odległości
 const int buttonStartStopPin = 12; // Przycisk START
 const int relayDirectionPin = 14;  // Przekaźnik kierunku jazdy (przód/tył)
@@ -23,17 +23,12 @@ const int relayControlPin = 26;    // Przekaźnik kontrolujący włączanie/wył
 const int sensorPin = 25;          // Czujnik szczelinowy
 const int endstopPin = 33;         // Krańcówka
 const int debugPin = 5;            // aktywacja trybu debug
+const int compensationPin = 32;    // wejście ADC kompensacji
+const int simulationPin = 32;      // PRZEKAŹNIK SYMULUJĄCY KRAŃCÓWKĘ:
+bool switchOnRelays = true;        // zmienna definiująca czy przekaźniki na płycie załaczane są HIGH czy LOW
 
-const int pulsePerRotation = 22;      // Impulsy na obrót
-const int distancePerPulse = 38 / 22; // cm na obrót
-const int slowingThreshold = 50;      // 0.5 metra (50 cm) przed celem
-
-// PRZEKAŹNIK SYMULUJĄCY KRAŃCÓWKĘ:
-const int simulationPin = 32;
-*/
-
-//ESP32 RELAY BOARD 4CHANNEL:
-
+// ESP32 RELAY BOARD 4CHANNEL:
+/*
 const int buttonDistancePin = 13;  // Wybór odległości
 const int buttonStartStopPin = 12; // Przycisk START
 const int relayDirectionPin = 32;  // Przekaźnik kierunku jazdy (przód/tył)
@@ -42,20 +37,23 @@ const int relayControlPin = 25;    // Przekaźnik kontrolujący włączanie/wył
 const int sensorPin = 27;          // Czujnik szczelinowy
 const int endstopPin = 14;         // Krańcówka
 const int debugPin = 5;            // aktywacja trybu debug
+const int compensationPin = 35;   // wejście ADC kompensacji
+const int simulationPin = 26;     // PRZEKAŹNIK SYMULUJĄCY KRAŃCÓWKĘ
+bool switchOnRelays = false;         // zmienna definiująca czy przekaźniki na płycie załaczane są HIGH(true) czy LOW(false)
+*/
 
 const int pulsePerRotation = 22;      // Impulsy na obrót
 const int distancePerPulse = 38 / 22; // cm na obrót
 const int slowingThreshold = 50;      // 0.5 metra (50 cm) przed celem
-
-// PRZEKAŹNIK SYMULUJĄCY KRAŃCÓWKĘ:
-const int simulationPin = 26;
-
+int stoppingComp = 0;                 // kompensacja zwalniania - zmienna robocza (w zależności od ustawień falownika)
+int savedCompensation;                // kompensacja zapisana w EEPROM
 int targetDistance = 0;
 int currentPosition = 0;
 bool isMoving = false;
 bool isSlowingDown = false;
 int selectedDistance = 5;     // Wybrany zakres odległości (5/10/15/25 m)
 bool forwardDirection = true; // Zmienna do kontroli kierunku
+bool debugModeOn = false;
 
 volatile unsigned long motorTimer = 0;
 volatile unsigned long pulseCheck = 0;
@@ -76,6 +74,8 @@ void arrowUp();
 void arrowDown();
 void arrowUpBlink();
 void arrowDownBlink();
+void stoppingCompensation();
+bool isDebugModeOn();
 
 bool endstopState = isAtEndstop();
 bool directionRelayState = isDirectionRelayForward();
@@ -88,6 +88,9 @@ void setup()
   Serial.begin(9600);
   Serial.println("Welcome V1.0");
 
+  EEPROM.begin(EEPROM_SIZE);
+  stoppingComp = EEPROM.read(0); // wczytanie zapisanej wartości z EEPROM
+
   pinMode(buttonDistancePin, INPUT_PULLUP);
   pinMode(buttonStartStopPin, INPUT_PULLUP);
   pinMode(relayDirectionPin, OUTPUT);
@@ -96,12 +99,14 @@ void setup()
   pinMode(sensorPin, INPUT_PULLUP);
   pinMode(endstopPin, INPUT_PULLUP);
   pinMode(debugPin, INPUT_PULLUP);
+  pinMode(compensationPin, INPUT);
 
   // Inicjowanie przekaźników jako wyłączonych
-  digitalWrite(relayDirectionPin, HIGH);
-  digitalWrite(relaySpeedPin, HIGH);
-  digitalWrite(relayControlPin, HIGH);
+  digitalWrite(relayDirectionPin, switchOnRelays ? LOW : HIGH);
+  digitalWrite(relaySpeedPin, switchOnRelays ? LOW : HIGH);
+  digitalWrite(relayControlPin, switchOnRelays ? LOW : HIGH);
 
+  debugModeOn = isDebugModeOn();
   endstopState = isAtEndstop();
   directionRelayState = isDirectionRelayForward();
 
@@ -141,25 +146,7 @@ void setup()
 
   // debug
   Serial.println("ControlPoint(1)");
-
-  /*Serial.println(endstopState ? "Ative" : "Not active");
-  Serial.print("isMoving: ");
-  Serial.println(isMoving ? "True" : "False");
-  Serial.print("isSlowingDown: ");
-  Serial.println(isSlowingDown ? "True" : "False");
-  Serial.print("Selected distance: ");
-  Serial.println(selectedDistance);
-  Serial.print("Forward direction: ");
-  Serial.println(forwardDirection ? "True" : "False");
-  Serial.print("Relay direction: ");
-  Serial.println(directionRelayState ? "Forward" : "Reverse");
-  Serial.print("Relay speed: ");
-  Serial.println(relaySpeedPin ? "LOW" : "HIGH");
-  Serial.print("Relay control: ");
-  Serial.println(relayControlPin ? "OFF" : "ON");
-  Serial.println();
-  */
-  // end debug
+  debugInfo();
 
   if (!endstopState)
   {
@@ -172,7 +159,6 @@ void setup()
     // tft.setCursor(0, 0);
     // tft.println("Select distance and press start...");
     // tft.display();
-    // distanceSelect();
     //  tu musi drukować zmiena distance
     tft.clearDisplay();
     tft.display();
@@ -208,26 +194,7 @@ void loop()
     // debug
 
     Serial.println("ControlPoint(2)");
-    /*
-    Serial.println(endstopState ? "Ative" : "No active");
-    Serial.print("isMoving: ");
-    Serial.println(isMoving ? "True" : "False");
-    Serial.print("isSlowingDown: ");
-    Serial.println(isSlowingDown ? "True" : "False");
-    Serial.print("Selected distance: ");
-    Serial.println(selectedDistance);
-    Serial.print("Forward direction: ");
-    Serial.println(forwardDirection ? "True" : "False");
-    Serial.print("Relay direction: ");
-    Serial.println(directionRelayState ? "Forward" : "Reverse");
-    Serial.print("Relay speed: ");
-    Serial.println(relaySpeedPin ? "LOW" : "HIGH");
-    Serial.print("Relay control: ");
-    Serial.println(relayControlPin ? "OFF" : "ON");
-    Serial.println();
-    // end debug
-
-   */
+    debugInfo();
   }
 
   int startStopState = digitalRead(buttonStartStopPin);
@@ -383,9 +350,18 @@ void startMotor()
 
     int targetPosition = selectedDistance * 100;
 
-    digitalWrite(relayDirectionPin, forwardDirection ? LOW : HIGH);
-    digitalWrite(relaySpeedPin, isSlowingDown ? HIGH : LOW); // High speed = relay speed ON/LOW; Low speed = relay speed OFF/HIGH
-    digitalWrite(relayControlPin, LOW);                      // Motor ON = relay control ON/LOW
+    if (switchOnRelays)
+    {
+      digitalWrite(relayDirectionPin, forwardDirection ? LOW : HIGH);
+      digitalWrite(relaySpeedPin, isSlowingDown ? HIGH : LOW); // High speed = relay speed ON/LOW; Low speed = relay speed OFF/HIGH
+      digitalWrite(relayControlPin, LOW);                      // Motor ON = relay control ON/LOW
+    }
+    else
+    {
+      digitalWrite(relayDirectionPin, forwardDirection ? HIGH : LOW);
+      digitalWrite(relaySpeedPin, isSlowingDown ? LOW : HIGH); // High speed = relay speed ON/LOW; Low speed = relay speed OFF/HIGH
+      digitalWrite(relayControlPin, HIGH);                     // Motor ON = relay control ON/LOW
+    }
     motorTimer = millis();
     pulseCheck = currentPosition;
 
@@ -415,9 +391,9 @@ void startMotor()
 
       if (/*currentPosition - pulseCheck < 1 ||*/ millis() - motorTimer > timeLimiter)
       {
-        digitalWrite(relayControlPin, HIGH);
-        digitalWrite(relaySpeedPin, HIGH);
-        digitalWrite(relayDirectionPin, HIGH);
+        digitalWrite(relayDirectionPin, switchOnRelays ? LOW : HIGH);
+        digitalWrite(relaySpeedPin, switchOnRelays ? LOW : HIGH);
+        digitalWrite(relayControlPin, switchOnRelays ? LOW : HIGH);
         tft.clearDisplay();
         tft.setCursor(5, 0);
         tft.setTextSize(8);
@@ -439,7 +415,7 @@ void startMotor()
         return;
       }
 
-      if (!isSlowingDown && currentPosition >= (targetPosition - slowingThreshold))
+      if (!isSlowingDown && currentPosition >= (targetPosition - slowingThreshold - savedCompensation))
       {
         isSlowingDown = true;
         digitalWrite(relaySpeedPin, HIGH);
@@ -459,9 +435,18 @@ void startMotor()
 
     int targetPosition = 0;
 
-    digitalWrite(relayDirectionPin, forwardDirection ? LOW : HIGH);
-    digitalWrite(relaySpeedPin, isSlowingDown ? HIGH : LOW); // High speed = relay speed ON/LOW; Low speed = relay speed OFF/HIGH
-    digitalWrite(relayControlPin, LOW);                      // Motor ON = relay control ON/LOW
+    if (switchOnRelays)
+    {
+      digitalWrite(relayDirectionPin, forwardDirection ? LOW : HIGH);
+      digitalWrite(relaySpeedPin, isSlowingDown ? HIGH : LOW); // High speed = relay speed ON/LOW; Low speed = relay speed OFF/HIGH
+      digitalWrite(relayControlPin, LOW);                      // Motor ON = relay control ON/LOW
+    }
+    else
+    {
+      digitalWrite(relayDirectionPin, forwardDirection ? HIGH : LOW);
+      digitalWrite(relaySpeedPin, isSlowingDown ? LOW : HIGH); // High speed = relay speed ON/LOW; Low speed = relay speed OFF/HIGH
+      digitalWrite(relayControlPin, HIGH);                     // Motor ON = relay control ON/LOW
+    }
 
     motorTimer = millis();
     pulseCheck = currentPosition;
@@ -490,9 +475,9 @@ void startMotor()
 
       if (/*currentPosition - pulseCheck < 1 ||*/ millis() - motorTimer > timeLimiter)
       {
-        digitalWrite(relayControlPin, HIGH);
-        digitalWrite(relaySpeedPin, HIGH);
-        digitalWrite(relayDirectionPin, HIGH);
+        digitalWrite(relayDirectionPin, switchOnRelays ? LOW : HIGH);
+        digitalWrite(relaySpeedPin, switchOnRelays ? LOW : HIGH);
+        digitalWrite(relayControlPin, switchOnRelays ? LOW : HIGH);
         tft.clearDisplay();
         tft.setCursor(5, 0);
         tft.setTextSize(8);
@@ -514,7 +499,7 @@ void startMotor()
         return;
       }
 
-      if (!isSlowingDown && currentPosition <= slowingThreshold)
+      if (!isSlowingDown && currentPosition <= slowingThreshold - savedCompensation)
       {
         isSlowingDown = true;
         digitalWrite(relaySpeedPin, HIGH);
@@ -550,11 +535,9 @@ void stopMotor()
   Serial.println(" Stopping motor");
   distanceDisplay();
   // tft.display();
-  digitalWrite(relayControlPin, HIGH);
-  digitalWrite(relaySpeedPin, HIGH);
-  digitalWrite(relayDirectionPin, HIGH);
-
-  // distanceSelect();
+  digitalWrite(relayDirectionPin, switchOnRelays ? LOW : HIGH);
+  digitalWrite(relaySpeedPin, switchOnRelays ? LOW : HIGH);
+  digitalWrite(relayControlPin, switchOnRelays ? LOW : HIGH);
 
   /*
   forwardDirection = !forwardDirection;
@@ -593,9 +576,18 @@ void homingMotor()
   forwardDirection = false; // Reverse
   isSlowingDown = true;     // Slow speed
   // startMotor();
-  digitalWrite(relayDirectionPin, forwardDirection ? LOW : HIGH); // HIGH = relay OFF/Reverse, LOW = relay ON/Forward
-  digitalWrite(relaySpeedPin, isSlowingDown ? HIGH : LOW);        // HIGH = relay OFF/Slow speed, LOW = relay ON/High speed
-  digitalWrite(relayControlPin, LOW);                             // HIGH = relay OFF/Motor OFF, LOW = relay ON/Motor ON
+  if (switchOnRelays)
+  {
+    digitalWrite(relayDirectionPin, forwardDirection ? LOW : HIGH);
+    digitalWrite(relaySpeedPin, isSlowingDown ? HIGH : LOW); // High speed = relay speed ON/LOW; Low speed = relay speed OFF/HIGH
+    digitalWrite(relayControlPin, LOW);                      // Motor ON = relay control ON/LOW
+  }
+  else
+  {
+    digitalWrite(relayDirectionPin, forwardDirection ? HIGH : LOW);
+    digitalWrite(relaySpeedPin, isSlowingDown ? LOW : HIGH); // High speed = relay speed ON/LOW; Low speed = relay speed OFF/HIGH
+    digitalWrite(relayControlPin, HIGH);                     // Motor ON = relay control ON/LOW
+  }
   motorTimer = millis();
   pulseCheck = currentPosition;
   // arrowDownBlink();
@@ -605,25 +597,7 @@ void homingMotor()
 
   // debug
   Serial.println("ControlPoint(5)");
-  /*
-  Serial.println(endstopState ? "Ative" : "No active");
-  Serial.print("isMoving: ");
-  Serial.println(isMoving ? "True" : "False");
-  Serial.print("isSlowingDown: ");
-  Serial.println(isSlowingDown ? "True" : "False");
-  Serial.print("Selected distance: ");
-  Serial.println(selectedDistance);
-  Serial.print("Forward direction: ");
-  Serial.println(forwardDirection ? "True" : "False");
-  Serial.print("Relay direction: ");
-  Serial.println(directionRelayState ? "Forward" : "Reverse");
-  Serial.print("Relay speed: ");
-  Serial.println(relaySpeedPin ? "LOW" : "HIGH");
-  Serial.print("Relay control: ");
-  Serial.println(relayControlPin ? "OFF" : "ON");
-  Serial.println();
-  // end debug
-  */
+  debugInfo();
 
   while (!isAtEndstop())
   {
@@ -678,25 +652,7 @@ void homingMotor()
 
   // debug
   Serial.println("ControlPoint(6)");
-  /*
-  Serial.println(endstopState ? "Ative" : "No active");
-  Serial.print("isMoving: ");
-  Serial.println(isMoving ? "True" : "False");
-  Serial.print("isSlowingDown: ");
-  Serial.println(isSlowingDown ? "True" : "False");
-  Serial.print("Selected distance: ");
-  Serial.println(selectedDistance);
-  Serial.print("Forward direction: ");
-  Serial.println(forwardDirection ? "True" : "False");
-  Serial.print("Relay direction: ");
-  Serial.println(directionRelayState ? "Forward" : "Reverse");
-  Serial.print("Relay speed: ");
-  Serial.println(relaySpeedPin ? "LOW" : "HIGH");
-  Serial.print("Relay control: ");
-  Serial.println(relayControlPin ? "OFF" : "ON");
-  Serial.println();
-  // end debug
-  */
+  debugInfo();
 }
 
 void pulseCounter()
@@ -846,4 +802,52 @@ void distanceDisplay()
   tft.setTextSize(8);
   tft.println(selectedDistance);
   tft.display();
+}
+
+void stoppingCompensation()
+{
+  stoppingComp = map(analogRead(compensationPin), 0, 4095, 0, slowingThreshold);
+  savedCompensation = stoppingComp;
+  if (isDebugModeOn)
+  {
+    EEPROM.write(0, savedCompensation);
+    EEPROM.commit();
+    Serial.println("State saved in flash memory");
+  }
+
+  Serial.print("StopComp: ");
+  Serial.println(stoppingComp);
+}
+
+bool isDebugModeOn()
+{
+  return digitalRead(debugPin) == LOW;
+}
+
+void debugInfo()
+{
+  if (debugModeOn)
+  {
+    Serial.print("Timestamp: ");
+    Serial.print(millis() / 1000);
+    Serial.println("s");
+    Serial.println(endstopState ? "Ative" : "No active");
+    Serial.print("isMoving: ");
+    Serial.println(isMoving ? "True" : "False");
+    Serial.print("isSlowingDown: ");
+    Serial.println(isSlowingDown ? "True" : "False");
+    Serial.print("Selected distance: ");
+    Serial.println(selectedDistance);
+    Serial.print("Forward direction: ");
+    Serial.println(forwardDirection ? "True" : "False");
+    Serial.print("Relay direction: ");
+    Serial.println(directionRelayState ? "Forward" : "Reverse");
+    Serial.print("Relay speed: ");
+    Serial.println(relaySpeedPin ? "LOW" : "HIGH");
+    Serial.print("Relay control: ");
+    Serial.println(relayControlPin ? "OFF" : "ON");
+    Serial.println();
+    Serial.print("StopComp: ");
+    Serial.println(stoppingComp);
+  }
 }
