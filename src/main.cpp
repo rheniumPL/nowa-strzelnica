@@ -14,7 +14,7 @@
 #define EEPROM_SIZE 1
 
 // ESP32 DEVKIT V1:
-
+/*
 const int buttonDistancePin = 13;  // Wybór odległości
 const int buttonStartStopPin = 12; // Przycisk START
 const int relayDirectionPin = 14;  // Przekaźnik kierunku jazdy (przód/tył)
@@ -26,9 +26,9 @@ const int debugPin = 5;            // aktywacja trybu debug
 const int compensationPin = 32;    // wejście ADC kompensacji
 const int simulationPin = 32;      // PRZEKAŹNIK SYMULUJĄCY KRAŃCÓWKĘ:
 bool switchOnRelays = true;        // zmienna definiująca czy przekaźniki na płycie załaczane są HIGH czy LOW
-
+*/
 // ESP32 RELAY BOARD 4CHANNEL:
-/*
+
 const int buttonDistancePin = 13;  // Wybór odległości
 const int buttonStartStopPin = 12; // Przycisk START
 const int relayDirectionPin = 32;  // Przekaźnik kierunku jazdy (przód/tył)
@@ -37,16 +37,14 @@ const int relayControlPin = 25;    // Przekaźnik kontrolujący włączanie/wył
 const int sensorPin = 27;          // Czujnik szczelinowy
 const int endstopPin = 14;         // Krańcówka
 const int debugPin = 5;            // aktywacja trybu debug
-const int compensationPin = 35;   // wejście ADC kompensacji
-const int simulationPin = 26;     // PRZEKAŹNIK SYMULUJĄCY KRAŃCÓWKĘ
-bool switchOnRelays = false;         // zmienna definiująca czy przekaźniki na płycie załaczane są HIGH(true) czy LOW(false)
-*/
+const int compensationPin = 35;    // wejście ADC kompensacji
+const int simulationPin = 26;      // PRZEKAŹNIK SYMULUJĄCY KRAŃCÓWKĘ
+bool switchOnRelays = true;        // zmienna definiująca czy przekaźniki na płycie załaczane są HIGH(true) czy LOW(false)
 
 const int pulsePerRotation = 22;      // Impulsy na obrót
 const int distancePerPulse = 38 / 22; // cm na obrót
-const int slowingThreshold = 50;      // 0.5 metra (50 cm) przed celem
-int stoppingComp = 0;                 // kompensacja zwalniania - zmienna robocza (w zależności od ustawień falownika)
-int savedCompensation;                // kompensacja zapisana w EEPROM
+const int slowingThreshold = 150;     // 0.5 metra (50 cm) przed celem
+int stoppingComp;                     // kompensacja zwalniania - zmienna robocza (w zależności od ustawień falownika)
 int targetDistance = 0;
 int currentPosition = 0;
 bool isMoving = false;
@@ -54,6 +52,7 @@ bool isSlowingDown = false;
 int selectedDistance = 5;     // Wybrany zakres odległości (5/10/15/25 m)
 bool forwardDirection = true; // Zmienna do kontroli kierunku
 bool debugModeOn = false;
+bool debugModeLast = false;
 
 volatile unsigned long motorTimer = 0;
 volatile unsigned long pulseCheck = 0;
@@ -67,7 +66,6 @@ bool isDirectionRelayForward();
 void homingMotor();
 void pulseCounter(); // Zmieniona nazwa funkcji obsługującej przerwanie
 void distanceDisplay();
-// void distanceSelect();
 void displayCenteredText(String text);
 void homingSymbol();
 void arrowUp();
@@ -76,21 +74,23 @@ void arrowUpBlink();
 void arrowDownBlink();
 void stoppingCompensation();
 bool isDebugModeOn();
+void debugInfo();
 
 bool endstopState = isAtEndstop();
 bool directionRelayState = isDirectionRelayForward();
 
-Adafruit_SSD1306 tft(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET); // uncomment if oled
-// Adafruit_GC9A01A tft(TFT_CS, TFT_DC); //comment if oled
+Adafruit_SSD1306 tft(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET); // Jeśli wyświetlacz  I2C oled
+// Adafruit_GC9A01A tft(TFT_CS, TFT_DC); //jeśli wyświetlacz TFT SPI
 
 void setup()
 {
   Serial.begin(9600);
-  Serial.println("Welcome V1.0");
+  Serial.println("Welcome V1.1");
 
-  EEPROM.begin(EEPROM_SIZE);
-  stoppingComp = EEPROM.read(0); // wczytanie zapisanej wartości z EEPROM
+  EEPROM.begin(EEPROM_SIZE);     // Inicjalizacja EEPROMu
+  stoppingComp = EEPROM.read(0); // Wczytanie zapisanej wartości z EEPROM
 
+  // Ustawianie IO
   pinMode(buttonDistancePin, INPUT_PULLUP);
   pinMode(buttonStartStopPin, INPUT_PULLUP);
   pinMode(relayDirectionPin, OUTPUT);
@@ -107,21 +107,31 @@ void setup()
   digitalWrite(relayControlPin, switchOnRelays ? LOW : HIGH);
 
   debugModeOn = isDebugModeOn();
+  debugModeLast = debugModeOn;
+  Serial.print("debugMode: ");
+  Serial.println(debugModeOn ? "Active" : "No Active");
+
+  stoppingCompensation();
+
+  Serial.print("StopCompensation: ");
+  Serial.println(stoppingComp);
+
+  debugInfo();
   endstopState = isAtEndstop();
   directionRelayState = isDirectionRelayForward();
 
   if (!tft.begin(SSD1306_SWITCHCAPVCC, 0x3C))
   {
-    Serial.println(F("SSD1306 allocation failed"));
+    Serial.println(F("OLED allocation failed"));
     for (;;)
-      ; // Don't proceed, loop forever
+      ; // Nieskończona pętla
   }
-  // Display Text
+  // Wyświetl tekst
   tft.clearDisplay();
   tft.setTextSize(1);
   tft.setTextColor(WHITE);
   tft.setCursor(0, 0);
-  tft.println("WELCOME V1.0");
+  tft.println("WELCOME V1.1");
   tft.display();
   delay(2000);
 
@@ -146,6 +156,9 @@ void setup()
 
   // debug
   Serial.println("ControlPoint(1)");
+  // debugModeOn = isDebugModeOn();
+  // Serial.print("debugMode: ");
+  // Serial.println(debugModeOn ? "Active" : "No Active");
   debugInfo();
 
   if (!endstopState)
@@ -170,8 +183,16 @@ void loop()
 {
   endstopState = isAtEndstop();
   directionRelayState = isDirectionRelayForward();
+  stoppingCompensation();
+  debugModeOn = isDebugModeOn();
+  if (debugModeLast != debugModeOn)
+  {
+    debugModeLast = debugModeOn;
+    Serial.println();
+    Serial.println("System restart");
+    ESP.restart();
+  }
 
-  // distanceSelect();
   int distanceButtonState = digitalRead(buttonDistancePin);
   if (distanceButtonState == LOW && endstopState)
   {
@@ -224,25 +245,7 @@ void loop()
 
       // debug
       Serial.println("ControlPoint(3)");
-      /*
-      Serial.println(endstopState ? "Ative" : "No active");
-      Serial.print("isMoving: ");
-      Serial.println(isMoving ? "True" : "False");
-      Serial.print("isSlowingDown: ");
-      Serial.println(isSlowingDown ? "True" : "False");
-      Serial.print("Selected distance: ");
-      Serial.println(selectedDistance);
-      Serial.print("Forward direction: ");
-      Serial.println(forwardDirection ? "True" : "False");
-      Serial.print("Relay direction: ");
-      Serial.println(directionRelayState ? "Forward" : "Reverse");
-      Serial.print("Relay speed: ");
-      Serial.println(relaySpeedPin ? "LOW" : "HIGH");
-      Serial.print("Relay control: ");
-      Serial.println(relayControlPin ? "OFF" : "ON");
-      Serial.println();
-      // end debug
-      */
+      debugInfo();
 
       startMotor();
       endstopState = isAtEndstop();
@@ -281,45 +284,6 @@ void loop()
     delay(500); // Debounce
   }
 }
-/*
-void startMotor() {
-  if (isAtEndstop()) {
-    Serial.println("Select a distance first2.");
-    Serial.println();
-    isMoving = false;
-    return;
-  }
-
-  currentPosition = 0.0;
-  attachInterrupt(digitalPinToInterrupt(sensorPin), pulseCounter, RISING); // Zmieniona nazwa przerwania
-  digitalWrite(relayDirectionPin, forwardDirection ? LOW : HIGH);
-  float targetPosition = selectedDistance * 100.0;
-  digitalWrite(relaySpeedPin, isSlowingDown ? HIGH : LOW);
-  digitalWrite(relayControlPin, LOW); // Motor ON = relay control ON/LOW
-
-  while (currentPosition < targetPosition && isMoving) {
-    Serial.print("\r            ");
-    Serial.print("\r");
-    Serial.print("Current position: ");
-    Serial.print(currentPosition);
-    Serial.print(" | Remain distance: ");
-    Serial.print(targetPosition - currentPosition);
-
-    if (currentPosition >= (targetPosition - slowingThreshold * 100.0)) {
-      isSlowingDown = true; // Zastosowanie isSlowingDown do przełączania prędkości
-      digitalWrite(relaySpeedPin, HIGH);
-      Serial.println("Motor on LOW speed");
-    }
-  }
-
-  stopMotor();
-  isSlowingDown = false;
-  isMoving = false;
-  forwardDirection = !forwardDirection;
-  digitalWrite(relayDirectionPin, forwardDirection ? LOW : HIGH);
-}
-
-*/
 
 void startMotor()
 {
@@ -415,7 +379,7 @@ void startMotor()
         return;
       }
 
-      if (!isSlowingDown && currentPosition >= (targetPosition - slowingThreshold - savedCompensation))
+      if (!isSlowingDown && currentPosition >= (targetPosition - slowingThreshold - stoppingComp))
       {
         isSlowingDown = true;
         digitalWrite(relaySpeedPin, HIGH);
@@ -451,7 +415,7 @@ void startMotor()
     motorTimer = millis();
     pulseCheck = currentPosition;
 
-    while (currentPosition > targetPosition && isMoving)
+    while (currentPosition > targetPosition && isMoving && !isAtEndstop()) // Dodano "&& !isAtEndstop" aby dojeżdzał do krańcówki zawsze
     {
       arrowDownBlink();
       distanceDisplay();
@@ -499,7 +463,7 @@ void startMotor()
         return;
       }
 
-      if (!isSlowingDown && currentPosition <= slowingThreshold - savedCompensation)
+      if (!isSlowingDown && currentPosition <= slowingThreshold - stoppingComp)
       {
         isSlowingDown = true;
         digitalWrite(relaySpeedPin, HIGH);
@@ -568,6 +532,7 @@ void homingMotor()
   }
 
   homingSymbol();
+  stoppingCompensation();
 
   while (digitalRead(buttonStartStopPin) == HIGH)
   {
@@ -576,7 +541,7 @@ void homingMotor()
   forwardDirection = false; // Reverse
   isSlowingDown = true;     // Slow speed
   // startMotor();
-  if (switchOnRelays)
+  if (!switchOnRelays)
   {
     digitalWrite(relayDirectionPin, forwardDirection ? LOW : HIGH);
     digitalWrite(relaySpeedPin, isSlowingDown ? HIGH : LOW); // High speed = relay speed ON/LOW; Low speed = relay speed OFF/HIGH
@@ -638,9 +603,9 @@ void homingMotor()
   // digitalWrite(relaySpeedPin, isSlowingDown ? HIGH : LOW);        // HIGH = relay OFF/Slow speed, LOW = relay ON/High speed
   // digitalWrite(relayControlPin, HIGH);                            // HIGH = relay OFF/Motor OFF, LOW = relay ON/Motor ON
 
-  digitalWrite(relayDirectionPin, HIGH); // HIGH = relay OFF/Reverse, LOW = relay ON/Forward
-  digitalWrite(relaySpeedPin, HIGH);     // HIGH = relay OFF/Slow speed, LOW = relay ON/High speed
-  digitalWrite(relayControlPin, HIGH);   // HIGH = relay OFF/Motor OFF, LOW = relay ON/Motor ON
+  // digitalWrite(relayDirectionPin, HIGH); // HIGH = relay OFF/Reverse, LOW = relay ON/Forward
+  // digitalWrite(relaySpeedPin, HIGH);     // HIGH = relay OFF/Slow speed, LOW = relay ON/High speed
+  // digitalWrite(relayControlPin, HIGH);   // HIGH = relay OFF/Motor OFF, LOW = relay ON/Motor ON
   endstopState = isAtEndstop();
   directionRelayState = isDirectionRelayForward();
   tft.clearDisplay();
@@ -806,17 +771,23 @@ void distanceDisplay()
 
 void stoppingCompensation()
 {
-  stoppingComp = map(analogRead(compensationPin), 0, 4095, 0, slowingThreshold);
-  savedCompensation = stoppingComp;
-  if (isDebugModeOn)
-  {
-    EEPROM.write(0, savedCompensation);
-    EEPROM.commit();
-    Serial.println("State saved in flash memory");
-  }
 
-  Serial.print("StopComp: ");
-  Serial.println(stoppingComp);
+  if (debugModeOn)
+  {
+    stoppingComp = map(analogRead(compensationPin), 0, 4095, 0, slowingThreshold);
+    // savedCompensation = stoppingComp;
+    EEPROM.write(0, stoppingComp);
+    EEPROM.commit();
+    Serial.print("\r");
+    Serial.print("                                            "); // czyszczenie linii
+    Serial.print("\r");
+    Serial.print("Stop compensation saved in flash memory: ");
+    // Serial.print("\r            ");
+
+    // Serial.print("Current position: ");
+    // Serial.print("StopCompensation(1): ");
+    Serial.print(stoppingComp);
+  }
 }
 
 bool isDebugModeOn()
@@ -831,6 +802,7 @@ void debugInfo()
     Serial.print("Timestamp: ");
     Serial.print(millis() / 1000);
     Serial.println("s");
+    Serial.print("Endstop: ");
     Serial.println(endstopState ? "Ative" : "No active");
     Serial.print("isMoving: ");
     Serial.println(isMoving ? "True" : "False");
@@ -846,8 +818,12 @@ void debugInfo()
     Serial.println(relaySpeedPin ? "LOW" : "HIGH");
     Serial.print("Relay control: ");
     Serial.println(relayControlPin ? "OFF" : "ON");
-    Serial.println();
-    Serial.print("StopComp: ");
+    Serial.print("StopCompensation: ");
     Serial.println(stoppingComp);
+    Serial.print("debugMode: ");
+    Serial.println(debugModeOn ? "Active" : "No Active");
+    Serial.print("debugMode2: ");
+    Serial.println(debugModeLast ? "Active" : "No Active");
+    Serial.println();
   }
 }
